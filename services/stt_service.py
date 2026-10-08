@@ -106,7 +106,7 @@ class UnifiedSTTManager:
 
     def __init__(self, language: str = "fr"):
         self.language = language
-        self.local_whisper = FasterWhisperSTT(model_size=os.getenv("WHISPER_MODEL_SIZE", "small"), device="cpu", compute_type="int8")
+        self.local_whisper = FasterWhisperSTT(model_size=os.getenv("WHISPER_MODEL_SIZE", "tiny"), device="cpu", compute_type="int8")
 
         self.groq_fallback = GroqWhisperSTT()
         self.fallback_count = 0
@@ -130,42 +130,30 @@ class UnifiedSTTManager:
 
     async def transcribe_audio(self, audio_bytes: bytes, language: str = "fr") -> str:
         start_time = time.perf_counter()
-        cpu_usage = psutil.cpu_percent(interval=None)
 
-        # 1. Overload Check: If CPU > 85%, immediately route to Groq Whisper Turbo
-        if cpu_usage > 85.0 and self.groq_fallback.client:
-            self.fallback_count += 1
-            logger.warning(f"[STT OVERLOAD # {self.fallback_count}] CPU at {cpu_usage}%. Routing to Groq Whisper Turbo...")
-            text = await self.groq_fallback.transcribe(audio_bytes, language=language)
-            stt_ms = (time.perf_counter() - start_time) * 1000
-            cleaned_text = self._clean_hallucinated_silence(text or "")
-            logger.info(f"[GROQ STT] Transcribed in {stt_ms:.1f}ms: '{cleaned_text}'")
-            return cleaned_text
+        # 1. Primary Ultra-Low Latency Engine: Groq Whisper Turbo (~120ms)
+        if self.groq_fallback.client:
+            try:
+                text = await self.groq_fallback.transcribe(audio_bytes, language=language)
+                stt_ms = (time.perf_counter() - start_time) * 1000
+                cleaned_text = self._clean_hallucinated_silence(text or "")
+                if cleaned_text:
+                    logger.info(f"[GROQ WHISPER STT] Ultra-fast transcription in {stt_ms:.1f}ms: '{cleaned_text}'")
+                    return cleaned_text
+            except Exception as e:
+                logger.warning(f"[GROQ STT FAILOVER] Groq transcription error: {e}. Falling back to local Faster-Whisper...")
 
-        # 2. Try Primary: Local Faster-Whisper
+        # 2. Local Fallback Engine: Faster-Whisper
         loop = asyncio.get_running_loop()
         try:
             text = await loop.run_in_executor(None, lambda: self.local_whisper.transcribe(audio_bytes, language=language))
             stt_ms = (time.perf_counter() - start_time) * 1000
             self.latency_history.append(stt_ms)
-
-            # If local took too long (>800ms) and yielded empty, attempt Groq
-            if (stt_ms > 800.0 or not text) and self.groq_fallback.client:
-                self.fallback_count += 1
-                logger.warning(f"[STT LATENCY EXCEEDED # {self.fallback_count}] Local took {stt_ms:.1f}ms. Falling back to Groq...")
-                groq_text = await self.groq_fallback.transcribe(audio_bytes, language=language)
-                if groq_text:
-                    cleaned_groq = self._clean_hallucinated_silence(groq_text)
-                    return cleaned_groq
-
             cleaned_text = self._clean_hallucinated_silence(text or "")
-            logger.info(f"[FASTER-WHISPER] Transcribed in {stt_ms:.1f}ms: '{cleaned_text}'")
+            logger.info(f"[FASTER-WHISPER STT] Transcribed in {stt_ms:.1f}ms: '{cleaned_text}'")
             return cleaned_text
 
         except Exception as e:
-            self.fallback_count += 1
-            logger.warning(f"[STT FAILOVER # {self.fallback_count}] Local Faster-Whisper failed ({e}). Attempting Groq fallback...")
-            text = await self.groq_fallback.transcribe(audio_bytes, language=language)
-            cleaned_text = self._clean_hallucinated_silence(text or "")
-            return cleaned_text
+            logger.error(f"[STT FAILED] All STT engines failed: {e}")
+            return ""
 
