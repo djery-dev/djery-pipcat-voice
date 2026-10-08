@@ -552,28 +552,70 @@ async def handle_browser_client(websocket, path):
             if full_assistant_reply:
                 session_config["last_assistant_speech"] = re.sub(r'[^\w\s]', '', full_assistant_reply.lower())
                 session_config["last_assistant_time"] = time.time()
+    except Exception as e:
+        logger.info(f"[BROWSER CLIENT DISCONNECTED]: {e}")
 
-    except websockets.exceptions.ConnectionClosed:
-        logger.info("[BROWSER CLIENT DISCONNECTED]")
+import aiohttp
+from aiohttp import web
 
+class WebSocketAdapter:
+    def __init__(self, ws):
+        self._ws = ws
+        self.remote_address = ("client", 0)
 
-async def router_handler(websocket, path=None):
-    # Route by path: /ws/telnyx vs /ws/browser
-    ws_path = getattr(websocket, "path", path or "/ws/browser")
-    if "telnyx" in ws_path:
-        await handle_telnyx_stream(websocket, ws_path)
-    else:
-        await handle_browser_client(websocket, ws_path)
+    async def send(self, message):
+        if isinstance(message, str):
+            await self._ws.send_str(message)
+        elif isinstance(message, (bytes, bytearray)):
+            await self._ws.send_bytes(bytes(message))
 
+    def __aiter__(self):
+        return self
 
-async def main():
+    async def __anext__(self):
+        try:
+            msg = await self._ws.receive()
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                return msg.data
+            elif msg.type == aiohttp.WSMsgType.BINARY:
+                return msg.data
+            else:
+                raise StopAsyncIteration
+        except Exception:
+            raise StopAsyncIteration
+
+async def http_health(request):
+    return web.json_response({"status": "online", "service": "Djery Pipcat Voice AI Worker", "port": PORT})
+
+async def ws_route_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    adapter = WebSocketAdapter(ws)
+    path = request.path
+    try:
+        if "telnyx" in path:
+            await handle_telnyx_stream(adapter, path)
+        else:
+            await handle_browser_client(adapter, path)
+    except Exception as e:
+        logger.info(f"[WS DISCONNECTED]: {e}")
+    return ws
+
+def create_app():
+    app = web.Application()
+    app.router.add_get("/", http_health)
+    app.router.add_get("/health", http_health)
+    app.router.add_get("/ws/browser", ws_route_handler)
+    app.router.add_get("/ws/telnyx", ws_route_handler)
+    app.router.add_get("/ws/pipcat", ws_route_handler)
+    return app
+
+if __name__ == "__main__":
     logger.info(f"🎙️ Starting Djery Voice AI Master Worker on port {PORT}...")
     logger.info(f"   -> STT: Faster-Whisper INT8 (Primary Local) | Groq Whisper Turbo (Fallback)")
     logger.info(f"   -> TTS: Piper-TTS ONNX (Primary Local) | Edge-TTS (Fallback)")
     logger.info(f"   -> Telephony: Telnyx TeXML Media Streams on /ws/telnyx")
-    logger.info(f"   -> Browser Testing on /ws/browser")
-    async with websockets.serve(router_handler, "0.0.0.0", PORT):
-        await asyncio.Future()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    logger.info(f"   -> Browser Testing on /ws/browser & /ws/pipcat")
+    logger.info(f"   -> HTTP Health Check on / & /health")
+    app = create_app()
+    web.run_app(app, host="0.0.0.0", port=PORT)
