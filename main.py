@@ -52,12 +52,26 @@ async def handle_telnyx_stream(websocket, path):
 
             if event_type == "start":
                 start_data = data.get("start", {})
-                serializer.stream_id = data.get("stream_id") or start_data.get("stream_id")
-                custom_params = start_data.get("custom_parameters", {})
-                session_context["restaurant_slug"] = custom_params.get("restaurant_slug", "djery-classic")
-                session_context["customer_phone"] = custom_params.get("from")
+                serializer.stream_id = data.get("streamSid") or data.get("stream_id") or start_data.get("streamSid") or start_data.get("stream_id")
+                custom_params = start_data.get("customParameters") or start_data.get("custom_parameters") or {}
+                session_context["restaurant_slug"] = custom_params.get("restaurant_slug") or "djery-classic"
+                session_context["customer_phone"] = custom_params.get("caller_phone") or custom_params.get("from")
                 session_context["language"] = custom_params.get("language", "fr")
-                logger.info(f"[TELNYX SESSION STARTED] Stream ID: {serializer.stream_id} for Restaurant: {session_context['restaurant_slug']}")
+                logger.info(f"[TELEPHONY SESSION STARTED] Stream ID: {serializer.stream_id} for Restaurant: {session_context['restaurant_slug']}")
+
+                # Play instant greeting to caller
+                greeting_text = "Bonjour et bienvenue chez Djery Classic ! Comment puis-je vous aider aujourd'hui ?"
+                messages_history.append({"role": "assistant", "content": greeting_text})
+                try:
+                    is_speaking = True
+                    audio_bytes = await tts_manager.generate_audio_bytes(greeting_text, language=session_context["language"], voice_name="fr-FR-DeniseNeural")
+                    if audio_bytes:
+                        media_msg = serializer.build_media_message(audio_bytes, input_sample_rate=16000)
+                        await websocket.send(media_msg)
+                except Exception as greet_err:
+                    logger.error(f"[TELEPHONY GREETING ERR] {greet_err}")
+                finally:
+                    is_speaking = False
 
             elif event_type == "media":
                 payload_b64 = data.get("media", {}).get("payload", "")
@@ -593,7 +607,7 @@ async def ws_route_handler(request):
     adapter = WebSocketAdapter(ws)
     path = request.path
     try:
-        if "telnyx" in path:
+        if "telnyx" in path or "twilio" in path:
             await handle_telnyx_stream(adapter, path)
         else:
             await handle_browser_client(adapter, path)
@@ -612,6 +626,7 @@ def create_app():
     app.router.add_get("/health", http_health)
     app.router.add_get("/ws/browser", ws_route_handler)
     app.router.add_get("/ws/telnyx", ws_route_handler)
+    app.router.add_get("/ws/twilio", ws_route_handler)
     app.router.add_get("/ws/pipcat", ws_route_handler)
     return app
 

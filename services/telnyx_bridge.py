@@ -42,11 +42,12 @@ class TelnyxFrameSerializer:
 
     def build_media_message(self, pcm_bytes: bytes, input_sample_rate: int = 16000) -> str:
         """
-        Builds Telnyx JSON media message frame.
+        Builds Telnyx & Twilio JSON media message frame.
         """
         payload_b64 = self.encode_outbound_media(pcm_bytes, input_sample_rate)
         return json.dumps({
             "event": "media",
+            "streamSid": self.stream_id,
             "stream_id": self.stream_id,
             "media": {
                 "payload": payload_b64
@@ -55,9 +56,10 @@ class TelnyxFrameSerializer:
 
     def build_clear_message(self) -> str:
         """
-        Builds Telnyx clear frame for instant interruption (barge-in).
+        Builds Telnyx & Twilio clear frame for instant interruption (barge-in).
         """
         return json.dumps({
             "event": "clear",
+            "streamSid": self.stream_id,
             "stream_id": self.stream_id
         })
