@@ -601,9 +601,14 @@ async def ws_route_handler(request):
         logger.info(f"[WS DISCONNECTED]: {e}")
     return ws
 
+async def root_handler(request):
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return await ws_route_handler(request)
+    return await http_health(request)
+
 def create_app():
     app = web.Application()
-    app.router.add_get("/", http_health)
+    app.router.add_get("/", root_handler)
     app.router.add_get("/health", http_health)
     app.router.add_get("/ws/browser", ws_route_handler)
     app.router.add_get("/ws/telnyx", ws_route_handler)
