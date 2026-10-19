@@ -418,14 +418,21 @@ async def handle_browser_client(websocket, path):
 
                 elif msg_type == "audio_blob":
                     payload_b64 = data.get("data", "")
+                    blob_lang = data.get("language") or req_lang
                     if payload_b64:
                         import base64
                         try:
                             audio_bytes = base64.b64decode(payload_b64)
                             t_stt = time.perf_counter()
-                            user_text = await stt_manager.transcribe_audio(audio_bytes, language=req_lang)
+                            user_text = await stt_manager.transcribe_audio(audio_bytes, language=blob_lang)
                             stt_latency = (time.perf_counter() - t_stt) * 1000
                             logger.info(f"[BROWSER B64 AUDIO STT RESULT] ({stt_latency:.1f}ms): '{user_text}'")
+                            if user_text:
+                                await websocket.send(json.dumps({
+                                    "type": "transcript",
+                                    "role": "user",
+                                    "content": user_text
+                                }))
                         except Exception as e:
                             logger.error(f"[BROWSER B64 DECODE ERR] {e}")
 

@@ -78,11 +78,23 @@ class GroqWhisperSTT:
 
         loop = asyncio.get_running_loop()
         def _call_groq():
-            file_tuple = ("audio.wav", audio_bytes, "audio/wav")
+            ext = "webm"
+            mime = "audio/webm"
+            if audio_bytes.startswith(b"OggS"):
+                ext = "ogg"
+                mime = "audio/ogg"
+            elif audio_bytes.startswith(b"RIFF"):
+                ext = "wav"
+                mime = "audio/wav"
+            elif len(audio_bytes) > 8 and (audio_bytes.startswith(b"\x00\x00\x00") or audio_bytes[4:8] == b"ftyp"):
+                ext = "mp4"
+                mime = "audio/mp4"
+
+            file_tuple = (f"audio.{ext}", audio_bytes, mime)
             groq_kwargs = {
                 "file": file_tuple,
                 "model": "whisper-large-v3-turbo",
-                "prompt": "Restaurant ordering menu items: burger, cheeseburger, pizza, frites, coca, coca zéro, boisson, table, réservation, livraison, emporter, burger, cheeseburger, drinks. Restaurante pedido, mesa. Restaurant Bestellung.",
+                "prompt": "Restaurant ordering menu items: burger, cheeseburger, pizza, frites, coca, coca zéro, boisson, table, réservation, livraison, emporter. Restaurant ordering: burgers, drinks. Restaurante pedido, mesa. Restaurant Bestellung.",
                 "response_format": "json",
                 "temperature": 0.0
             }
