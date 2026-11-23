@@ -75,7 +75,6 @@ class FasterWhisperSTT:
             temperature=0.0,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=400, speech_pad_ms=150),
-            initial_prompt="Restaurant ordering menu items: burger, cheeseburger, pizza, frites, coca, coca zéro, boisson, table, réservation, livraison, emporter. Restaurant ordering: burgers, cheeseburgers, drinks, table booking. Restaurante pedido, mesa. Restaurant Bestellung, Tisch."
         )
         text = " ".join([segment.text.strip() for segment in segments]).strip()
         return text
@@ -123,7 +122,6 @@ class GroqWhisperSTT:
             groq_kwargs = {
                 "file": file_tuple,
                 "model": "whisper-large-v3-turbo",
-                "prompt": "Restaurant ordering menu items: burger, cheeseburger, pizza, frites, coca, coca zéro, boisson, table, réservation, livraison, emporter. Restaurant ordering: burgers, drinks. Restaurante pedido, mesa. Restaurant Bestellung.",
                 "response_format": "json",
                 "temperature": 0.0
             }
@@ -158,11 +156,14 @@ class UnifiedSTTManager:
         if not text:
             return ""
         norm = text.strip().lower()
-        # Strictly filter real subtitle artifacts, NOT genuine customer words like 'merci' or 'thanks'
+        # Strictly filter real subtitle artifacts and Whisper prompt-echo hallucinations
         hallucinations = {
             "thank you for watching.", "thanks for watching!", "thanks for watching.",
             "thank you for watching!", "thank you for watching", "merci d'avoir regardé cette vidéo.",
-            "sous-titres réalisés par la communauté d'amara.org", "amara.org", "subtitles by..."
+            "sous-titres réalisés par la communauté d'amara.org", "amara.org", "subtitles by...",
+            "restaurant.", "restaurant", "restaurant ordering.", "restaurant ordering",
+            "restaurant ordering menu items.", "restaurant ordering menu items",
+            "the end", "the end.", "the end how", "you", "you."
         }
         if norm in hallucinations or norm.startswith("sous-titres") or norm.startswith("subtitles by") or norm.startswith("amara.org"):
             logger.info(f"[WHISPER HALLUCINATION FILTERED] Dropped silence artifact: '{text}'")

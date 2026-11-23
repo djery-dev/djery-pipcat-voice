@@ -73,7 +73,7 @@ class DjeryBrainPipeline:
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(endpoint, json=payload, headers=headers, timeout=10.0) as resp:
+                async with session.post(endpoint, json=payload, headers=headers, timeout=18.0) as resp:
                     brain_ms = (time.perf_counter() - start_brain) * 1000
 
                     if resp.status == 200:
