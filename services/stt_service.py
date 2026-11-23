@@ -156,6 +156,11 @@ class UnifiedSTTManager:
         if not text:
             return ""
         norm = text.strip().lower()
+        # Filter pure punctuation or single-char noise (e.g. '...', '.', '?')
+        alpha_only = "".join(c for c in norm if c.isalnum())
+        if len(alpha_only) < 2:
+            logger.info(f"[WHISPER HALLUCINATION FILTERED] Dropped punctuation/noise artifact: '{text}'")
+            return ""
         # Strictly filter real subtitle artifacts and Whisper prompt-echo hallucinations
         hallucinations = {
             "thank you for watching.", "thanks for watching!", "thanks for watching.",
@@ -185,9 +190,10 @@ class UnifiedSTTManager:
             try:
                 text = await self.groq_fallback.transcribe(audio_bytes, language=language)
                 stt_ms = (time.perf_counter() - start_time) * 1000
-                cleaned_text = self._clean_hallucinated_silence(text or "")
-                if cleaned_text:
-                    logger.info(f"[GROQ WHISPER STT] Ultra-fast transcription in {stt_ms:.1f}ms: '{cleaned_text}'")
+                if text is not None:
+                    cleaned_text = self._clean_hallucinated_silence(text)
+                    if cleaned_text:
+                        logger.info(f"[GROQ WHISPER STT] Ultra-fast transcription in {stt_ms:.1f}ms: '{cleaned_text}'")
                     return cleaned_text
             except Exception as e:
                 logger.warning(f"[GROQ STT FAILOVER] Groq transcription error: {e}. Falling back to local Faster-Whisper...")
