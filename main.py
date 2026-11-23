@@ -44,7 +44,48 @@ async def handle_telnyx_stream(websocket, path):
     audio_buffer = bytearray()
     call: Optional[CallContext] = None
     messages_history = []
+
+    # Outbound audio playback queue & barge-in control
+    playback_queue: asyncio.Queue = asyncio.Queue()
+    playback_cancel: asyncio.Event = asyncio.Event()
     is_speaking = False
+    speech_start_time = 0.0
+
+    async def audio_player_worker():
+        nonlocal is_speaking, speech_start_time
+        try:
+            while True:
+                audio_bytes = await playback_queue.get()
+                if audio_bytes is None:
+                    break
+                try:
+                    is_speaking = True
+                    speech_start_time = time.perf_counter()
+                    mulaw = serializer.audio_to_mulaw(audio_bytes)
+                    frames = serializer.chunk_mulaw_frames(mulaw, chunk_size=320)
+                    delay_s = 0.038  # 38ms delay for 40ms frame (real-time streaming pace)
+
+                    for frame_b64 in frames:
+                        if playback_cancel.is_set():
+                            logger.info("[STREAM STOPPED] Outbound audio playback aborted due to barge-in")
+                            break
+                        msg = json.dumps({
+                            "event": "media",
+                            "streamSid": serializer.stream_id,
+                            "media": {"payload": frame_b64}
+                        })
+                        await websocket.send(msg)
+                        await asyncio.sleep(delay_s)
+                except Exception as play_err:
+                    logger.error(f"[AUDIO PLAYER ERR] {play_err}")
+                finally:
+                    playback_queue.task_done()
+                    if playback_queue.empty():
+                        is_speaking = False
+        except asyncio.CancelledError:
+            pass
+
+    player_task = asyncio.create_task(audio_player_worker())
 
     try:
         async for raw_msg in websocket:
@@ -64,7 +105,7 @@ async def handle_telnyx_stream(websocket, path):
                         sorry = CallContext.not_configured_message("fr")
                         audio_bytes = await tts_manager.generate_audio_bytes(sorry, language="fr", voice_name=get_voice_for_language("fr"))
                         if audio_bytes:
-                            await websocket.send(serializer.build_media_message(audio_bytes, input_sample_rate=16000))
+                            await playback_queue.put(audio_bytes)
                     except Exception as sorry_err:
                         logger.error(f"[TELEPHONY REFUSAL AUDIO ERR] {sorry_err}")
                     break
@@ -75,15 +116,12 @@ async def handle_telnyx_stream(websocket, path):
                 greeting_text = call.greeting()
                 messages_history.append({"role": "assistant", "content": greeting_text})
                 try:
-                    is_speaking = True
                     audio_bytes = await tts_manager.generate_audio_bytes(greeting_text, language=call.language, voice_name=get_voice_for_language(call.language))
                     if audio_bytes:
-                        media_msg = serializer.build_media_message(audio_bytes, input_sample_rate=16000)
-                        await websocket.send(media_msg)
+                        playback_cancel.clear()
+                        await playback_queue.put(audio_bytes)
                 except Exception as greet_err:
                     logger.error(f"[TELEPHONY GREETING ERR] {greet_err}")
-                finally:
-                    is_speaking = False
 
             elif event_type == "media":
                 if call is None:
@@ -94,15 +132,23 @@ async def handle_telnyx_stream(websocket, path):
                     continue
 
                 pcm_16k = serializer.decode_inbound_media(payload_b64)
+                vad_event = call_vad.process_frame(pcm_16k)
 
-                # Interruption / Barge-in check
-                if is_speaking and call_vad.is_speech(pcm_16k):
+                # Interruption / Barge-in check:
+                # Requires AI to be speaking, past 500ms echo suppression window, and customer has sustained speech (>=150ms).
+                if is_speaking and (time.perf_counter() - speech_start_time > 0.5) and vad_event.get("speech_started"):
                     logger.info("[BARGE-IN TRIGGERED] User interrupted assistant speech. Clearing output buffer...")
+                    playback_cancel.set()
+                    while not playback_queue.empty():
+                        try:
+                            playback_queue.get_nowait()
+                            playback_queue.task_done()
+                        except:
+                            break
                     await websocket.send(serializer.build_clear_message())
                     is_speaking = False
 
                 audio_buffer.extend(pcm_16k)
-                vad_event = call_vad.process_frame(pcm_16k)
 
                 # Finalize audio segment ONLY when 800ms silence hangover elapses (speech_ended)
                 # OR when safety buffer limit (15 seconds / 480,000 bytes) is reached.
@@ -123,6 +169,7 @@ async def handle_telnyx_stream(websocket, path):
                             logger.info(f"[CALLER SPOKE - SINGLE TURN] '{user_text}' (STT Latency: {stt_ms:.1f}ms)")
 
                             first_sentence_sent = False
+                            playback_cancel.clear()
 
                             async for chunk in brain_pipeline.execute_turn_stream(
                                 restaurant_slug=call.restaurant_slug,
@@ -140,23 +187,27 @@ async def handle_telnyx_stream(websocket, path):
                                 tts_ms = (time.perf_counter() - t_tts_start) * 1000
 
                                 if len(audio_out) > 0:
-                                    is_speaking = True
                                     if not first_sentence_sent:
                                         ttfb_total = (time.perf_counter() - t0) * 1000
                                         logger.info(f"[PERCEIVED LATENCY - TIME TO FIRST AUDIO] {ttfb_total:.1f}ms (STT: {stt_ms:.1f}ms, Brain: {chunk['brain_latency_ms']:.1f}ms, TTS TTFB: {tts_ms:.1f}ms)")
                                         first_sentence_sent = True
 
-                                    # Send audio frame to the phone
-                                    await websocket.send(serializer.build_media_message(audio_out, input_sample_rate=16000))
+                                    # Stream audio chunk to the caller in real-time
+                                    if not playback_cancel.is_set():
+                                        await playback_queue.put(audio_out)
 
             elif event_type == "stop":
                 logger.info(f"[TELNYX CALL ENDED] Stream ID: {serializer.stream_id}")
                 break
 
-    except websockets.exceptions.ConnectionClosed:
-        logger.info("[TELNYX WS CLOSED] Connection disconnected")
     except Exception as e:
-        logger.error(f"[TELNYX WS ERROR] {e}")
+        logger.info(f"[TELNYX WS DISCONNECTED]: {e}")
+    finally:
+        player_task.cancel()
+        try:
+            await player_task
+        except asyncio.CancelledError:
+            pass
 
 
 def detect_spoken_language(text: str) -> str:

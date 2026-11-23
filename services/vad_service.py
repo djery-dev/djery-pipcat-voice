@@ -49,9 +49,9 @@ class SileroVAD:
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
 
-        # Energy / RMS heuristic baseline + Silero VAD check
+        # Energy / RMS heuristic baseline (0.040 filters phone line noise/breaths while detecting speech)
         energy = np.sqrt(np.mean(audio_float32 ** 2))
-        return energy > 0.015
+        return energy > 0.040
 
     def process_frame(self, audio_chunk: bytes) -> dict:
         """

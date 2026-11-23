@@ -30,14 +30,18 @@ class TelnyxFrameSerializer:
         pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
         return pcm_16k
 
-    def encode_outbound_media(self, audio_bytes: bytes, input_sample_rate: int = 16000) -> str:
+    def audio_to_mulaw(self, audio_bytes: bytes, input_sample_rate: int = 16000) -> bytes:
         """
-        Encodes linear PCM audio (or compressed audio like MP3 from Edge-TTS) into 8kHz G.711 mu-law base64 string for Twilio & Telnyx.
+        Converts linear PCM or compressed audio (MP3, WAV, OGG) to raw 8kHz G.711 mu-law bytes.
         """
+        if not audio_bytes:
+            return b""
+
         # If input is compressed audio (e.g. MP3 from Edge-TTS), decode directly to 8kHz linear PCM using ffmpeg
         if (audio_bytes.startswith(b"ID3") or 
             audio_bytes.startswith(b"\xff\xfb") or 
             audio_bytes.startswith(b"\xff\xf3") or 
+            audio_bytes.startswith(b"\xff\xf2") or 
             audio_bytes.startswith(b"OggS") or 
             audio_bytes.startswith(b"RIFF")):
             try:
@@ -49,8 +53,7 @@ class TelnyxFrameSerializer:
                     check=True
                 )
                 pcm_8k = proc.stdout
-                mulaw_bytes = audioop.lin2ulaw(pcm_8k, 2)
-                return base64.b64encode(mulaw_bytes).decode("utf-8")
+                return audioop.lin2ulaw(pcm_8k, 2)
             except Exception as e:
                 logger.error(f"[TELEPHONY AUDIO DECODE ERR] ffmpeg decode failed: {e}")
 
@@ -62,7 +65,26 @@ class TelnyxFrameSerializer:
             pcm_8k = pcm_bytes
 
         # 2. Convert 8kHz Linear PCM to 8kHz mu-law
-        mulaw_bytes = audioop.lin2ulaw(pcm_8k, 2)
+        return audioop.lin2ulaw(pcm_8k, 2)
+
+    def chunk_mulaw_frames(self, mulaw_bytes: bytes, chunk_size: int = 320) -> list:
+        """
+        Slices raw 8kHz mu-law audio into frames (e.g. 320 bytes = 40ms, 160 bytes = 20ms)
+        for Twilio / Telnyx media streams, returning base64 encoded strings.
+        """
+        if not mulaw_bytes:
+            return []
+        frames = []
+        for i in range(0, len(mulaw_bytes), chunk_size):
+            chunk = mulaw_bytes[i:i + chunk_size]
+            frames.append(base64.b64encode(chunk).decode("ascii"))
+        return frames
+
+    def encode_outbound_media(self, audio_bytes: bytes, input_sample_rate: int = 16000) -> str:
+        """
+        Encodes linear PCM audio (or compressed audio like MP3 from Edge-TTS) into 8kHz G.711 mu-law base64 string for Twilio & Telnyx.
+        """
+        mulaw_bytes = self.audio_to_mulaw(audio_bytes, input_sample_rate)
         return base64.b64encode(mulaw_bytes).decode("utf-8")
 
     def build_media_message(self, pcm_bytes: bytes, input_sample_rate: int = 16000) -> str:
