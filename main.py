@@ -49,7 +49,7 @@ async def handle_telnyx_stream(websocket, path):
     playback_queue: asyncio.Queue = asyncio.Queue()
     playback_cancel: asyncio.Event = asyncio.Event()
     is_speaking = False
-    speech_start_time = 0.0
+    speech_start_time = float("inf")
 
     async def audio_player_worker():
         nonlocal is_speaking, speech_start_time
@@ -62,8 +62,8 @@ async def handle_telnyx_stream(websocket, path):
                     is_speaking = True
                     speech_start_time = time.perf_counter()
                     mulaw = serializer.audio_to_mulaw(audio_bytes)
-                    frames = serializer.chunk_mulaw_frames(mulaw, chunk_size=320)
-                    delay_s = 0.038  # 38ms delay for 40ms frame (real-time streaming pace)
+                    frames = serializer.chunk_mulaw_frames(mulaw, chunk_size=160)
+                    delay_s = 0.020  # 20ms delay for native 20ms (160 bytes) Twilio frames
 
                     for frame_b64 in frames:
                         if playback_cancel.is_set():
@@ -119,6 +119,9 @@ async def handle_telnyx_stream(websocket, path):
                     audio_bytes = await tts_manager.generate_audio_bytes(greeting_text, language=call.language, voice_name=get_voice_for_language(call.language))
                     if audio_bytes:
                         playback_cancel.clear()
+                        call_vad.reset_state()
+                        audio_buffer.clear()
+                        speech_start_time = time.perf_counter()
                         await playback_queue.put(audio_bytes)
                 except Exception as greet_err:
                     logger.error(f"[TELEPHONY GREETING ERR] {greet_err}")
@@ -135,8 +138,8 @@ async def handle_telnyx_stream(websocket, path):
                 vad_event = call_vad.process_frame(pcm_16k)
 
                 # Interruption / Barge-in check:
-                # Requires AI to be speaking, past 500ms echo suppression window, and customer has sustained speech (>=150ms).
-                if is_speaking and (time.perf_counter() - speech_start_time > 0.5) and vad_event.get("speech_started"):
+                # Requires AI to be speaking, past 800ms echo suppression window, and customer has sustained speech (>=150ms).
+                if is_speaking and (time.perf_counter() - speech_start_time > 0.8) and vad_event.get("speech_started"):
                     logger.info("[BARGE-IN TRIGGERED] User interrupted assistant speech. Clearing output buffer...")
                     playback_cancel.set()
                     while not playback_queue.empty():
@@ -158,6 +161,17 @@ async def handle_telnyx_stream(websocket, path):
                     chunk_to_process = bytes(audio_buffer)
                     audio_buffer.clear()
                     call_vad.reset_state()
+
+                    # Stop any previous audio playback when caller completes a turn
+                    is_speaking = False
+                    speech_start_time = float("inf")
+                    playback_cancel.set()
+                    while not playback_queue.empty():
+                        try:
+                            playback_queue.get_nowait()
+                            playback_queue.task_done()
+                        except:
+                            break
 
                     # Only run STT if speech was detected in segment or audio contains substantial frames
                     if vad_event.get("has_spoken_in_segment") or len(chunk_to_process) >= 16000:
@@ -191,6 +205,10 @@ async def handle_telnyx_stream(websocket, path):
                                         ttfb_total = (time.perf_counter() - t0) * 1000
                                         logger.info(f"[PERCEIVED LATENCY - TIME TO FIRST AUDIO] {ttfb_total:.1f}ms (STT: {stt_ms:.1f}ms, Brain: {chunk['brain_latency_ms']:.1f}ms, TTS TTFB: {tts_ms:.1f}ms)")
                                         first_sentence_sent = True
+                                        # Clear any stale frames recorded during LLM thinking
+                                        call_vad.reset_state()
+                                        audio_buffer.clear()
+                                        speech_start_time = time.perf_counter()
 
                                     # Stream audio chunk to the caller in real-time
                                     if not playback_cancel.is_set():
