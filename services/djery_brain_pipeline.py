@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import Dict, Any, List, Optional, AsyncGenerator
@@ -26,7 +27,9 @@ class DjeryBrainPipeline:
         customer_phone: Optional[str] = None,
         messages_history: List[Dict[str, Any]] = None,
         language: str = "fr",
-        is_initial_greeting: bool = False
+        is_initial_greeting: bool = False,
+        voice_session_id: Optional[str] = None,
+        call_token: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Executes turn against Djery Brain API and yields sentence chunks for instant TTS streaming.
@@ -57,6 +60,16 @@ class DjeryBrainPipeline:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+
+        # A real phone call proves which call it is: Laravel then fixes the restaurant, keeps one
+        # conversation per call and records the transcript. Without it the turn is a plain test turn.
+        if voice_session_id:
+            payload["voice_session_id"] = voice_session_id
+            payload["call_token"] = call_token or ""
+
+        worker_secret = os.getenv("VOICE_WORKER_SECRET", "")
+        if worker_secret:
+            headers["X-Djery-Worker-Secret"] = worker_secret
 
         try:
             async with aiohttp.ClientSession() as session:

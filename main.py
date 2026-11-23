@@ -15,6 +15,7 @@ from services.stt_service import UnifiedSTTManager
 from services.tts_service import UnifiedTTSManager
 from services.djery_brain_pipeline import DjeryBrainPipeline
 from services.telnyx_bridge import TelnyxFrameSerializer
+from services.call_context import CallContext, CallIdentityError
 
 load_dotenv()
 
@@ -31,17 +32,17 @@ vad_service = SileroVAD()
 
 async def handle_telnyx_stream(websocket, path):
     """
-    Handles live Telnyx TeXML bidirectional phone call streaming.
+    Handles one live phone call (Twilio / Telnyx media stream).
+
+    Everything that identifies the call (restaurant, language, call id, call token) comes from the
+    stream parameters Laravel put in the TwiML. Nothing is shared between two calls: each one has its
+    own conversation id, its own history and its own voice-activity state.
     """
     logger.info(f"[TELNYX CALL CONNECTED] Inbound media stream from {websocket.remote_address}")
     serializer = TelnyxFrameSerializer()
+    call_vad = SileroVAD()  # per call: the detector keeps state about the current speaker
     audio_buffer = bytearray()
-    session_context = {
-        "restaurant_slug": "djery-classic",
-        "conversation_id": "telnyx_call",
-        "customer_phone": None,
-        "language": "fr"
-    }
+    call: Optional[CallContext] = None
     messages_history = []
     is_speaking = False
 
@@ -53,18 +54,29 @@ async def handle_telnyx_stream(websocket, path):
             if event_type == "start":
                 start_data = data.get("start", {})
                 serializer.stream_id = data.get("streamSid") or data.get("stream_id") or start_data.get("streamSid") or start_data.get("stream_id")
-                custom_params = start_data.get("customParameters") or start_data.get("custom_parameters") or {}
-                session_context["restaurant_slug"] = custom_params.get("restaurant_slug") or "djery-classic"
-                session_context["customer_phone"] = custom_params.get("caller_phone") or custom_params.get("from")
-                session_context["language"] = custom_params.get("language", "fr")
-                logger.info(f"[TELEPHONY SESSION STARTED] Stream ID: {serializer.stream_id} for Restaurant: {session_context['restaurant_slug']}")
 
-                # Play instant greeting to caller
-                greeting_text = "Bonjour et bienvenue chez Djery Classic ! Comment puis-je vous aider aujourd'hui ?"
+                try:
+                    call = CallContext.from_start_event(start_data)
+                except CallIdentityError as identity_err:
+                    # Never fall back to a default restaurant: say sorry and hang up.
+                    logger.error(f"[TELEPHONY SESSION REFUSED] {identity_err}")
+                    try:
+                        sorry = CallContext.not_configured_message("fr")
+                        audio_bytes = await tts_manager.generate_audio_bytes(sorry, language="fr", voice_name=get_voice_for_language("fr"))
+                        if audio_bytes:
+                            await websocket.send(serializer.build_media_message(audio_bytes, input_sample_rate=16000))
+                    except Exception as sorry_err:
+                        logger.error(f"[TELEPHONY REFUSAL AUDIO ERR] {sorry_err}")
+                    break
+
+                logger.info(f"[TELEPHONY SESSION STARTED] Stream ID: {serializer.stream_id} Call: {call.voice_session_id} Restaurant: {call.restaurant_slug} Language: {call.language}")
+
+                # Instant greeting in the restaurant's language
+                greeting_text = call.greeting()
                 messages_history.append({"role": "assistant", "content": greeting_text})
                 try:
                     is_speaking = True
-                    audio_bytes = await tts_manager.generate_audio_bytes(greeting_text, language=session_context["language"], voice_name="fr-FR-DeniseNeural")
+                    audio_bytes = await tts_manager.generate_audio_bytes(greeting_text, language=call.language, voice_name=get_voice_for_language(call.language))
                     if audio_bytes:
                         media_msg = serializer.build_media_message(audio_bytes, input_sample_rate=16000)
                         await websocket.send(media_msg)
@@ -74,20 +86,23 @@ async def handle_telnyx_stream(websocket, path):
                     is_speaking = False
 
             elif event_type == "media":
+                if call is None:
+                    continue  # media before a valid start: ignore
+
                 payload_b64 = data.get("media", {}).get("payload", "")
                 if not payload_b64:
                     continue
 
                 pcm_16k = serializer.decode_inbound_media(payload_b64)
-                
+
                 # Interruption / Barge-in check
-                if is_speaking and vad_service.is_speech(pcm_16k):
+                if is_speaking and call_vad.is_speech(pcm_16k):
                     logger.info("[BARGE-IN TRIGGERED] User interrupted assistant speech. Clearing output buffer...")
                     await websocket.send(serializer.build_clear_message())
                     is_speaking = False
 
                 audio_buffer.extend(pcm_16k)
-                vad_event = vad_service.process_frame(pcm_16k)
+                vad_event = call_vad.process_frame(pcm_16k)
 
                 # Finalize audio segment ONLY when 800ms silence hangover elapses (speech_ended)
                 # OR when safety buffer limit (15 seconds / 480,000 bytes) is reached.
@@ -96,28 +111,28 @@ async def handle_telnyx_stream(websocket, path):
                 if should_finalize and len(audio_buffer) > 0:
                     chunk_to_process = bytes(audio_buffer)
                     audio_buffer.clear()
-                    vad_service.reset_state()
+                    call_vad.reset_state()
 
                     # Only run STT if speech was detected in segment or audio contains substantial frames
                     if vad_event.get("has_spoken_in_segment") or len(chunk_to_process) >= 16000:
                         t0 = time.perf_counter()
-                        user_text = await stt_manager.transcribe_audio(chunk_to_process, language=session_context["language"])
+                        user_text = await stt_manager.transcribe_audio(chunk_to_process, language=call.language)
                         stt_ms = (time.perf_counter() - t0) * 1000
 
                         if user_text and user_text.strip():
                             logger.info(f"[CALLER SPOKE - SINGLE TURN] '{user_text}' (STT Latency: {stt_ms:.1f}ms)")
 
-                            # Stream turn to Djery Brain
-                            t_brain_start = time.perf_counter()
                             first_sentence_sent = False
 
                             async for chunk in brain_pipeline.execute_turn_stream(
-                                restaurant_slug=session_context["restaurant_slug"],
+                                restaurant_slug=call.restaurant_slug,
                                 message=user_text,
-                                conversation_id=session_context["conversation_id"],
-                                customer_phone=session_context["customer_phone"],
+                                conversation_id=call.conversation_id,
+                                customer_phone=call.caller_phone,
                                 messages_history=messages_history,
-                                language=session_context["language"]
+                                language=call.language,
+                                voice_session_id=call.voice_session_id,
+                                call_token=call.call_token,
                             ):
                                 sentence_text = chunk["text"]
                                 t_tts_start = time.perf_counter()
@@ -131,7 +146,7 @@ async def handle_telnyx_stream(websocket, path):
                                         logger.info(f"[PERCEIVED LATENCY - TIME TO FIRST AUDIO] {ttfb_total:.1f}ms (STT: {stt_ms:.1f}ms, Brain: {chunk['brain_latency_ms']:.1f}ms, TTS TTFB: {tts_ms:.1f}ms)")
                                         first_sentence_sent = True
 
-                                    # Send audio frame to Telnyx
+                                    # Send audio frame to the phone
                                     await websocket.send(serializer.build_media_message(audio_out, input_sample_rate=16000))
 
             elif event_type == "stop":

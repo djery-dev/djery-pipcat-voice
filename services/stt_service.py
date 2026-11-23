@@ -3,10 +3,37 @@ import io
 import logging
 import os
 import time
+import wave
 import psutil
 from typing import Optional
 
 logger = logging.getLogger("pipcat.stt_service")
+
+
+def ensure_wav_container(audio_bytes: bytes, sample_rate: int = 16000) -> bytes:
+    """
+    Ensures audio bytes are wrapped in a valid media container (WAV) if raw PCM is passed.
+    Twilio/Telnyx media streams arrive as raw 16kHz S16LE PCM bytes without file container headers.
+    Whisper and Groq APIs reject raw headerless PCM bytes unless properly wrapped with a RIFF/WAV header.
+    """
+    if not audio_bytes:
+        return audio_bytes
+
+    # If already a container (WAV, OGG, WebM, MP4), return directly
+    if (audio_bytes.startswith(b"RIFF") or
+        audio_bytes.startswith(b"OggS") or
+        audio_bytes.startswith(b"\x1a\x45\xdf\xa3") or
+        (len(audio_bytes) > 8 and audio_bytes[4:8] in (b"ftyp", b"moov", b"wide"))):
+        return audio_bytes
+
+    # Wrap raw 16-bit mono PCM into standard WAV container
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio_bytes)
+    return wav_io.getvalue()
 
 class FasterWhisperSTT:
     """
@@ -39,7 +66,8 @@ class FasterWhisperSTT:
         # Normalize 'be' (Belgian French) to 'fr'
         wh_lang = "fr" if language in ["fr", "be"] else (language if language in ["en", "de", "es"] else None)
 
-        audio_file = io.BytesIO(audio_bytes)
+        wav_bytes = ensure_wav_container(audio_bytes, 16000)
+        audio_file = io.BytesIO(wav_bytes)
         segments, info = self.model.transcribe(
             audio_file,
             language=wh_lang,
@@ -78,19 +106,20 @@ class GroqWhisperSTT:
 
         loop = asyncio.get_running_loop()
         def _call_groq():
-            ext = "webm"
-            mime = "audio/webm"
-            if audio_bytes.startswith(b"OggS"):
+            wav_bytes = ensure_wav_container(audio_bytes, 16000)
+            ext = "wav"
+            mime = "audio/wav"
+            if wav_bytes.startswith(b"OggS"):
                 ext = "ogg"
                 mime = "audio/ogg"
-            elif audio_bytes.startswith(b"RIFF"):
-                ext = "wav"
-                mime = "audio/wav"
-            elif len(audio_bytes) > 8 and (audio_bytes.startswith(b"\x00\x00\x00") or audio_bytes[4:8] == b"ftyp"):
+            elif wav_bytes.startswith(b"\x1a\x45\xdf\xa3"):
+                ext = "webm"
+                mime = "audio/webm"
+            elif len(wav_bytes) > 8 and wav_bytes[4:8] in (b"ftyp", b"moov", b"wide"):
                 ext = "mp4"
                 mime = "audio/mp4"
 
-            file_tuple = (f"audio.{ext}", audio_bytes, mime)
+            file_tuple = (f"audio.{ext}", wav_bytes, mime)
             groq_kwargs = {
                 "file": file_tuple,
                 "model": "whisper-large-v3-turbo",

@@ -2,6 +2,7 @@ import audioop
 import base64
 import json
 import logging
+import subprocess
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger("pipcat.telnyx_bridge")
@@ -26,11 +27,32 @@ class TelnyxFrameSerializer:
         pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
         return pcm_16k
 
-    def encode_outbound_media(self, pcm_bytes: bytes, input_sample_rate: int = 16000) -> str:
+    def encode_outbound_media(self, audio_bytes: bytes, input_sample_rate: int = 16000) -> str:
         """
-        Encodes linear PCM audio from TTS into 8kHz G.711 mu-law base64 string for Telnyx.
+        Encodes linear PCM audio (or compressed audio like MP3 from Edge-TTS) into 8kHz G.711 mu-law base64 string for Twilio & Telnyx.
         """
+        # If input is compressed audio (e.g. MP3 from Edge-TTS), decode directly to 8kHz linear PCM using ffmpeg
+        if (audio_bytes.startswith(b"ID3") or 
+            audio_bytes.startswith(b"\xff\xfb") or 
+            audio_bytes.startswith(b"\xff\xf3") or 
+            audio_bytes.startswith(b"OggS") or 
+            audio_bytes.startswith(b"RIFF")):
+            try:
+                proc = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
+                    input=audio_bytes,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=True
+                )
+                pcm_8k = proc.stdout
+                mulaw_bytes = audioop.lin2ulaw(pcm_8k, 2)
+                return base64.b64encode(mulaw_bytes).decode("utf-8")
+            except Exception as e:
+                logger.error(f"[TELEPHONY AUDIO DECODE ERR] ffmpeg decode failed: {e}")
+
         # 1. Resample to 8kHz if needed
+        pcm_bytes = audio_bytes
         if input_sample_rate != 8000:
             pcm_8k, _ = audioop.ratecv(pcm_bytes, 2, 1, input_sample_rate, 8000, None)
         else:
