@@ -237,26 +237,21 @@ class DjeryBrainPipeline:
         if not clean_speech:
             return []
         
-        # If very short, return as single chunk
-        if len(clean_speech) <= 90:
+        # If <= 260 chars (typical 1-2 sentence voice response), synthesize as a single seamless audio stream
+        if len(clean_speech) <= 260:
             return [clean_speech]
 
-        # Split on sentence terminators (. ! ?) or colons followed by a space
-        raw_sentences = [s.strip() for s in re.split(r'(?<=[.!?:])\s+', clean_speech) if s.strip()]
+        # Split only on real sentence terminators (. ! ?), NEVER on colons (:)
+        raw_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean_speech) if s.strip()]
         if not raw_sentences:
             return [clean_speech]
 
         chunks = []
-        # Isolate crisp first sentence (<= 100 chars) for ultra-fast lead-in TTFB
-        first = raw_sentences[0]
-        chunks.append(first)
-
-        # Group remaining sentences into balanced chunks of ~120-180 chars
         current = ""
-        for s in raw_sentences[1:]:
+        for s in raw_sentences:
             if not current:
                 current = s
-            elif len(current) + len(s) < 180:
+            elif len(current) + len(s) < 220:
                 current = f"{current} {s}"
             else:
                 chunks.append(current)

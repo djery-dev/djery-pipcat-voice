@@ -163,9 +163,16 @@ class UnifiedSTTManager:
             "sous-titres réalisés par la communauté d'amara.org", "amara.org", "subtitles by...",
             "restaurant.", "restaurant", "restaurant ordering.", "restaurant ordering",
             "restaurant ordering menu items.", "restaurant ordering menu items",
-            "the end", "the end.", "the end how", "you", "you."
+            "the end", "the end.", "the end how", "you", "you.",
+            "sous-titrage société radio-canada", "sous-titrage societe radio-canada",
+            "sous-titrage st' 501", "sous-titrage", "radio-canada"
         }
-        if norm in hallucinations or norm.startswith("sous-titres") or norm.startswith("subtitles by") or norm.startswith("amara.org"):
+        if (norm in hallucinations or
+            norm.startswith("sous-titres") or
+            norm.startswith("sous-titrage") or
+            norm.startswith("subtitles by") or
+            norm.startswith("amara.org") or
+            "radio-canada" in norm):
             logger.info(f"[WHISPER HALLUCINATION FILTERED] Dropped silence artifact: '{text}'")
             return ""
         return text

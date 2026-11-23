@@ -163,17 +163,6 @@ async def handle_telnyx_stream(websocket, path):
                     audio_buffer.clear()
                     call_vad.reset_state()
 
-                    # Stop any previous audio playback when caller completes a turn
-                    is_speaking = False
-                    speech_start_time = float("inf")
-                    playback_cancel.set()
-                    while not playback_queue.empty():
-                        try:
-                            playback_queue.get_nowait()
-                            playback_queue.task_done()
-                        except:
-                            break
-
                     # Only run STT if speech was detected in segment or audio contains substantial frames
                     if vad_event.get("has_spoken_in_segment") or len(chunk_to_process) >= 16000:
                         t0 = time.perf_counter()
@@ -182,6 +171,17 @@ async def handle_telnyx_stream(websocket, path):
 
                         if user_text and user_text.strip():
                             logger.info(f"[CALLER SPOKE - SINGLE TURN] '{user_text}' (STT Latency: {stt_ms:.1f}ms)")
+
+                            # Stop any previous audio playback ONLY when caller actually spoke real words
+                            is_speaking = False
+                            speech_start_time = float("inf")
+                            playback_cancel.set()
+                            while not playback_queue.empty():
+                                try:
+                                    playback_queue.get_nowait()
+                                    playback_queue.task_done()
+                                except:
+                                    break
 
                             first_sentence_sent = False
                             playback_cancel.clear()
