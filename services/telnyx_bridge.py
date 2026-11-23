@@ -1,4 +1,7 @@
-import audioop
+try:
+    import audioop
+except ImportError:
+    import audioop_lts as audioop
 import base64
 import json
 import logging
