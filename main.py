@@ -1,3 +1,5 @@
+import aiohttp
+from aiohttp import web
 import asyncio
 import io
 import json
@@ -6,7 +8,6 @@ import os
 import random
 import re
 import time
-import websockets
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
@@ -660,8 +661,6 @@ async def handle_browser_client(websocket, path):
     except Exception as e:
         logger.info(f"[BROWSER CLIENT DISCONNECTED]: {e}")
 
-import aiohttp
-from aiohttp import web
 
 class WebSocketAdapter:
     def __init__(self, ws):
