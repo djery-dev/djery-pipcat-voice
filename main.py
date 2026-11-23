@@ -198,7 +198,11 @@ async def handle_telnyx_stream(websocket, path):
                             ):
                                 sentence_text = chunk["text"]
                                 t_tts_start = time.perf_counter()
-                                audio_out = await tts_manager.generate_audio_bytes(sentence_text)
+                                audio_out = await tts_manager.generate_audio_bytes(
+                                    sentence_text,
+                                    language=call.language,
+                                    voice_name=get_voice_for_language(call.language)
+                                )
                                 tts_ms = (time.perf_counter() - t_tts_start) * 1000
 
                                 if len(audio_out) > 0:

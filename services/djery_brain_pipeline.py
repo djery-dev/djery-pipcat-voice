@@ -82,6 +82,7 @@ class DjeryBrainPipeline:
                         if assistant_text:
                             messages_history.append({"role": "assistant", "content": assistant_text})
                         logger.info(f"[DJERY BRAIN ISOLATED LATENCY] Brain (LLM + Tools) completed in {brain_ms:.1f}ms")
+                        logger.info(f"[DJERY BRAIN TEXT] '{assistant_text}'")
 
                         # Smart Voice Chunking: keeps questions and choices unified to prevent gaps/silence
                         sentences = self.chunk_assistant_text_for_speech(assistant_text, language)
